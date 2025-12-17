@@ -1,0 +1,50 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# macOS
+.DS_Store
+
+# Local configuration
+local.properties
+
+# Logs
+*.log
+
+# Database files (for local testing)
+*.db
+*.db-shm
+*.db-wal
+
+# Compiled class files
+*.class
+
+# Python virtual environment
+cli/image_gen/venv/
+cli/image_gen/__pycache__/
+*.pyc
+*.pyo
+
+# Hugging Face cache (model files)
+.cache/
+
+# Generated images (optional - uncomment to ignore)
+# .rpgenerator/images/
+
+# Large music files
+cli/music/*.wav
+cli/music/*.sf2
+cli/music/*.mid

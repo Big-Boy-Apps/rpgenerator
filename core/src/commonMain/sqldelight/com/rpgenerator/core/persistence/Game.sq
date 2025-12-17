@@ -1,0 +1,1107 @@
+-- Table for storing game metadata
+CREATE TABLE IF NOT EXISTS Game (
+    id TEXT PRIMARY KEY NOT NULL,
+    playerName TEXT NOT NULL,
+    systemType TEXT NOT NULL,
+    difficulty TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    playtime INTEGER NOT NULL,
+    lastPlayedAt INTEGER NOT NULL,
+    createdAt INTEGER NOT NULL
+);
+
+-- Table for storing complete game state (JSON serialized)
+CREATE TABLE IF NOT EXISTS GameState (
+    gameId TEXT PRIMARY KEY NOT NULL,
+    stateJson TEXT NOT NULL,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for event log with extended metadata
+CREATE TABLE IF NOT EXISTS GameEventLog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gameId TEXT NOT NULL,
+    eventType TEXT NOT NULL,
+    eventJson TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+
+    -- Extended metadata for advanced event system
+    category TEXT NOT NULL DEFAULT 'NARRATIVE',
+    importance TEXT NOT NULL DEFAULT 'NORMAL',
+    searchableText TEXT NOT NULL DEFAULT '',
+
+    -- Entity links (nullable)
+    npcId TEXT,
+    locationId TEXT,
+    questId TEXT,
+    itemId TEXT,
+
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for NPCs (JSON serialized)
+CREATE TABLE IF NOT EXISTS NPC (
+    id TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    locationId TEXT NOT NULL,
+    npcJson TEXT NOT NULL,
+    PRIMARY KEY (id, gameId),
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for Quests (JSON serialized)
+CREATE TABLE IF NOT EXISTS Quest (
+    id TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    questJson TEXT NOT NULL,
+    status TEXT NOT NULL,
+    PRIMARY KEY (id, gameId),
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for Custom Locations (JSON serialized)
+CREATE TABLE IF NOT EXISTS CustomLocation (
+    id TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    locationJson TEXT NOT NULL,
+    PRIMARY KEY (id, gameId),
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for Plot Threads (JSON serialized)
+CREATE TABLE IF NOT EXISTS PlotThread (
+    id TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    threadJson TEXT NOT NULL,
+    category TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    status TEXT NOT NULL,
+    createdAtLevel INTEGER NOT NULL,
+    lastUpdated INTEGER NOT NULL,
+    PRIMARY KEY (id, gameId),
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for Trajectory Analysis (JSON serialized)
+CREATE TABLE IF NOT EXISTS TrajectoryAnalysis (
+    gameId TEXT PRIMARY KEY NOT NULL,
+    analysisJson TEXT NOT NULL,
+    playerLevel INTEGER NOT NULL,
+    nextReviewLevel INTEGER NOT NULL,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- ========================================
+-- PLOT GRAPH PERSISTENCE SYSTEM
+-- ========================================
+
+-- Table for storing complete plot graph (JSON serialized)
+CREATE TABLE IF NOT EXISTS PlotGraph (
+    gameId TEXT PRIMARY KEY NOT NULL,
+    graphJson TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    lastUpdated INTEGER NOT NULL,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for plot graph nodes (denormalized for queries)
+CREATE TABLE IF NOT EXISTS PlotNode (
+    id TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    threadId TEXT NOT NULL,
+    nodeJson TEXT NOT NULL,
+    tier INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    branch INTEGER NOT NULL DEFAULT 0,
+    beatType TEXT NOT NULL,
+    triggerLevel INTEGER NOT NULL,
+    triggered INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    abandoned INTEGER NOT NULL DEFAULT 0,
+    createdAt INTEGER NOT NULL,
+    PRIMARY KEY (id, gameId),
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for plot graph edges
+CREATE TABLE IF NOT EXISTS PlotEdge (
+    id TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    fromNodeId TEXT NOT NULL,
+    toNodeId TEXT NOT NULL,
+    edgeType TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (id, gameId),
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE,
+    FOREIGN KEY (fromNodeId, gameId) REFERENCES PlotNode(id, gameId) ON DELETE CASCADE,
+    FOREIGN KEY (toNodeId, gameId) REFERENCES PlotNode(id, gameId) ON DELETE CASCADE
+);
+
+-- Table for agent proposals (for transparency and debugging)
+CREATE TABLE IF NOT EXISTS AgentProposal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gameId TEXT NOT NULL,
+    agentId TEXT NOT NULL,
+    agentType TEXT NOT NULL,
+    proposalJson TEXT NOT NULL,
+    planningSessionId TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for consensus results
+CREATE TABLE IF NOT EXISTS ConsensusResult (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gameId TEXT NOT NULL,
+    planningSessionId TEXT NOT NULL,
+    consensusJson TEXT NOT NULL,
+    consensusType TEXT NOT NULL,
+    conflictCount INTEGER NOT NULL,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for planning sessions (full replan cycles)
+CREATE TABLE IF NOT EXISTS PlanningSession (
+    id TEXT PRIMARY KEY NOT NULL,
+    gameId TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    triggerReason TEXT NOT NULL,
+    playerLevel INTEGER NOT NULL,
+    graphVersion INTEGER NOT NULL,
+    nextReplanLevel INTEGER NOT NULL,
+    startedAt INTEGER NOT NULL,
+    completedAt INTEGER,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Indexes for plot graph queries
+CREATE INDEX IF NOT EXISTS idx_plot_graph_game ON PlotGraph(gameId);
+CREATE INDEX IF NOT EXISTS idx_plot_node_game ON PlotNode(gameId);
+CREATE INDEX IF NOT EXISTS idx_plot_node_status ON PlotNode(gameId, triggered, completed, abandoned);
+CREATE INDEX IF NOT EXISTS idx_plot_node_tier ON PlotNode(gameId, tier, sequence);
+CREATE INDEX IF NOT EXISTS idx_plot_node_trigger ON PlotNode(gameId, triggerLevel);
+CREATE INDEX IF NOT EXISTS idx_plot_edge_game ON PlotEdge(gameId);
+CREATE INDEX IF NOT EXISTS idx_plot_edge_from ON PlotEdge(gameId, fromNodeId);
+CREATE INDEX IF NOT EXISTS idx_plot_edge_to ON PlotEdge(gameId, toNodeId);
+CREATE INDEX IF NOT EXISTS idx_plot_edge_type ON PlotEdge(gameId, edgeType);
+CREATE INDEX IF NOT EXISTS idx_agent_proposal_session ON AgentProposal(planningSessionId);
+CREATE INDEX IF NOT EXISTS idx_consensus_session ON ConsensusResult(planningSessionId);
+CREATE INDEX IF NOT EXISTS idx_planning_session_game ON PlanningSession(gameId, startedAt DESC);
+
+-- ========================================
+-- AGENT MEMORY PERSISTENCE SYSTEM
+-- ========================================
+
+-- Table for storing agent conversation history and working memory
+-- Each agent (GameMaster, Planner, NPCAgent, etc.) can persist their conversation state
+CREATE TABLE IF NOT EXISTS AgentMemory (
+    agentId TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    memoryJson TEXT NOT NULL,          -- Serialized conversation history
+    messageCount INTEGER NOT NULL,      -- Number of messages in history
+    tokenEstimate INTEGER NOT NULL,     -- Estimated token count for tracking
+    lastConsolidated INTEGER,           -- Timestamp of last consolidation (null if never)
+    lastUpdated INTEGER NOT NULL,       -- Timestamp of last update
+    PRIMARY KEY (agentId, gameId),
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for logging individual agent actions with reasoning
+-- Stores important decisions made by agents for analysis and debugging
+CREATE TABLE IF NOT EXISTS AgentAction (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agentId TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    actionType TEXT NOT NULL,           -- Type of action: "NPC_CREATED", "QUEST_GENERATED", "PLOT_THREAD_CREATED", etc.
+    actionJson TEXT NOT NULL,           -- Full action details (JSON)
+    reasoning TEXT NOT NULL,            -- Agent's reasoning for this action
+    playerLevel INTEGER NOT NULL,       -- Game context: player level at time of action
+    timestamp INTEGER NOT NULL,
+
+    -- Optional entity links for querying
+    npcId TEXT,
+    questId TEXT,
+    plotThreadId TEXT,
+    locationId TEXT,
+
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for storing consolidated/summarized agent memory
+-- When conversation history gets too long, create summaries to preserve context
+CREATE TABLE IF NOT EXISTS AgentConsolidation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agentId TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    consolidationType TEXT NOT NULL,    -- "FULL" (complete reset), "PARTIAL" (summarize old messages)
+    summaryJson TEXT NOT NULL,          -- Summarized context from old messages
+    messagesConsolidated INTEGER NOT NULL, -- How many messages were summarized
+    playerLevelStart INTEGER NOT NULL,  -- Level range this summary covers
+    playerLevelEnd INTEGER NOT NULL,
+    timestamp INTEGER NOT NULL,
+
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Indexes for agent memory queries
+CREATE INDEX IF NOT EXISTS idx_agent_memory_game ON AgentMemory(gameId);
+CREATE INDEX IF NOT EXISTS idx_agent_action_agent_game ON AgentAction(agentId, gameId, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_action_type ON AgentAction(actionType);
+CREATE INDEX IF NOT EXISTS idx_agent_action_timestamp ON AgentAction(gameId, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_action_npc ON AgentAction(npcId);
+CREATE INDEX IF NOT EXISTS idx_agent_action_quest ON AgentAction(questId);
+CREATE INDEX IF NOT EXISTS idx_agent_action_plot ON AgentAction(plotThreadId);
+CREATE INDEX IF NOT EXISTS idx_agent_consolidation_agent_game ON AgentConsolidation(agentId, gameId, timestamp DESC);
+
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_event_game_timestamp ON GameEventLog(gameId, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_category ON GameEventLog(category);
+CREATE INDEX IF NOT EXISTS idx_event_importance ON GameEventLog(importance);
+CREATE INDEX IF NOT EXISTS idx_event_npc ON GameEventLog(npcId);
+CREATE INDEX IF NOT EXISTS idx_event_location ON GameEventLog(locationId);
+CREATE INDEX IF NOT EXISTS idx_event_quest ON GameEventLog(questId);
+
+-- Indexes for NPC queries
+CREATE INDEX IF NOT EXISTS idx_npc_game ON NPC(gameId);
+CREATE INDEX IF NOT EXISTS idx_npc_location ON NPC(gameId, locationId);
+
+-- Indexes for Quest queries
+CREATE INDEX IF NOT EXISTS idx_quest_game ON Quest(gameId);
+CREATE INDEX IF NOT EXISTS idx_quest_status ON Quest(gameId, status);
+
+-- Indexes for CustomLocation queries
+CREATE INDEX IF NOT EXISTS idx_custom_location_game ON CustomLocation(gameId);
+
+-- Indexes for PlotThread queries
+CREATE INDEX IF NOT EXISTS idx_plot_thread_game ON PlotThread(gameId);
+CREATE INDEX IF NOT EXISTS idx_plot_thread_status ON PlotThread(gameId, status);
+CREATE INDEX IF NOT EXISTS idx_plot_thread_priority ON PlotThread(gameId, priority);
+CREATE INDEX IF NOT EXISTS idx_plot_thread_category ON PlotThread(gameId, category);
+
+-- Queries for Game table
+selectAll:
+SELECT * FROM Game ORDER BY lastPlayedAt DESC;
+
+selectById:
+SELECT * FROM Game WHERE id = ?;
+
+insert:
+INSERT INTO Game (id, playerName, systemType, difficulty, level, playtime, lastPlayedAt, createdAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+updateMetadata:
+UPDATE Game
+SET level = ?, playtime = ?, lastPlayedAt = ?
+WHERE id = ?;
+
+delete:
+DELETE FROM Game WHERE id = ?;
+
+-- Queries for GameState table
+selectState:
+SELECT * FROM GameState WHERE gameId = ?;
+
+insertState:
+INSERT OR REPLACE INTO GameState (gameId, stateJson)
+VALUES (?, ?);
+
+deleteState:
+DELETE FROM GameState WHERE gameId = ?;
+
+-- Queries for GameEventLog table
+selectRecentEvents:
+SELECT * FROM GameEventLog
+WHERE gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+insertEvent:
+INSERT INTO GameEventLog (
+    gameId,
+    eventType,
+    eventJson,
+    timestamp,
+    category,
+    importance,
+    searchableText,
+    npcId,
+    locationId,
+    questId,
+    itemId
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteEvents:
+DELETE FROM GameEventLog WHERE gameId = ?;
+
+-- Advanced event queries
+searchEventsByText:
+SELECT * FROM GameEventLog
+WHERE gameId = ?
+AND searchableText LIKE '%' || ? || '%'
+ORDER BY timestamp DESC
+LIMIT ?;
+
+getEventsByCategory:
+SELECT * FROM GameEventLog
+WHERE gameId = ?
+AND category = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+searchEventsAdvanced:
+SELECT * FROM GameEventLog
+WHERE gameId = ?
+AND (:query IS NULL OR searchableText LIKE '%' || :query || '%')
+AND (:category IS NULL OR category = :category)
+AND (:npcId IS NULL OR npcId = :npcId)
+AND (:locationId IS NULL OR locationId = :locationId)
+AND (:questId IS NULL OR questId = :questId)
+ORDER BY
+    CASE importance
+        WHEN 'CRITICAL' THEN 10
+        WHEN 'HIGH' THEN 5
+        WHEN 'NORMAL' THEN 3
+        WHEN 'LOW' THEN 1
+        ELSE 0
+    END DESC,
+    timestamp DESC
+LIMIT ?;
+
+getEventCountByCategory:
+SELECT category, COUNT(*)
+FROM GameEventLog
+WHERE gameId = ?
+GROUP BY category;
+
+getTotalEventCount:
+SELECT COUNT(*)
+FROM GameEventLog
+WHERE gameId = ?;
+
+deleteOldEvents:
+DELETE FROM GameEventLog
+WHERE gameId = ?
+AND timestamp < ?;
+
+-- Queries for NPC table
+selectNPCById:
+SELECT * FROM NPC WHERE gameId = ? AND id = ?;
+
+selectNPCsByGame:
+SELECT * FROM NPC WHERE gameId = ?;
+
+selectNPCsByLocation:
+SELECT * FROM NPC WHERE gameId = ? AND locationId = ?;
+
+insertNPC:
+INSERT OR REPLACE INTO NPC (id, gameId, locationId, npcJson)
+VALUES (?, ?, ?, ?);
+
+updateNPC:
+UPDATE NPC
+SET locationId = ?, npcJson = ?
+WHERE gameId = ? AND id = ?;
+
+deleteNPC:
+DELETE FROM NPC WHERE gameId = ? AND id = ?;
+
+deleteNPCsByGame:
+DELETE FROM NPC WHERE gameId = ?;
+
+-- Queries for Quest table
+selectQuestById:
+SELECT * FROM Quest WHERE gameId = ? AND id = ?;
+
+selectQuestsByGame:
+SELECT * FROM Quest WHERE gameId = ?;
+
+selectQuestsByStatus:
+SELECT * FROM Quest WHERE gameId = ? AND status = ?;
+
+insertQuest:
+INSERT OR REPLACE INTO Quest (id, gameId, questJson, status)
+VALUES (?, ?, ?, ?);
+
+updateQuestStatus:
+UPDATE Quest
+SET questJson = ?, status = ?
+WHERE gameId = ? AND id = ?;
+
+deleteQuest:
+DELETE FROM Quest WHERE gameId = ? AND id = ?;
+
+deleteQuestsByGame:
+DELETE FROM Quest WHERE gameId = ?;
+
+-- Queries for CustomLocation table
+selectCustomLocationById:
+SELECT * FROM CustomLocation WHERE gameId = ? AND id = ?;
+
+selectCustomLocationsByGame:
+SELECT * FROM CustomLocation WHERE gameId = ?;
+
+insertCustomLocation:
+INSERT OR REPLACE INTO CustomLocation (id, gameId, locationJson)
+VALUES (?, ?, ?);
+
+deleteCustomLocation:
+DELETE FROM CustomLocation WHERE gameId = ? AND id = ?;
+
+deleteCustomLocationsByGame:
+DELETE FROM CustomLocation WHERE gameId = ?;
+
+-- Queries for PlotThread table
+selectPlotThreadById:
+SELECT * FROM PlotThread WHERE gameId = ? AND id = ?;
+
+selectPlotThreadsByGame:
+SELECT * FROM PlotThread WHERE gameId = ?;
+
+selectPlotThreadsByStatus:
+SELECT * FROM PlotThread WHERE gameId = ? AND status = ?;
+
+selectActivePlotThreads:
+SELECT * FROM PlotThread
+WHERE gameId = ?
+AND status = 'ACTIVE'
+ORDER BY priority DESC, lastUpdated DESC;
+
+selectPendingPlotThreads:
+SELECT * FROM PlotThread
+WHERE gameId = ?
+AND status = 'PENDING'
+ORDER BY priority DESC;
+
+insertPlotThread:
+INSERT OR REPLACE INTO PlotThread (id, gameId, threadJson, category, priority, status, createdAtLevel, lastUpdated)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+updatePlotThreadStatus:
+UPDATE PlotThread
+SET threadJson = ?, status = ?, lastUpdated = ?
+WHERE gameId = ? AND id = ?;
+
+deletePlotThread:
+DELETE FROM PlotThread WHERE gameId = ? AND id = ?;
+
+deletePlotThreadsByGame:
+DELETE FROM PlotThread WHERE gameId = ?;
+
+-- Queries for TrajectoryAnalysis table
+selectTrajectoryAnalysis:
+SELECT * FROM TrajectoryAnalysis WHERE gameId = ?;
+
+insertTrajectoryAnalysis:
+INSERT OR REPLACE INTO TrajectoryAnalysis (gameId, analysisJson, playerLevel, nextReviewLevel, timestamp)
+VALUES (?, ?, ?, ?, ?);
+
+deleteTrajectoryAnalysis:
+DELETE FROM TrajectoryAnalysis WHERE gameId = ?;
+
+-- ========================================
+-- AGENT MEMORY QUERIES
+-- ========================================
+
+-- Queries for AgentMemory table
+selectAgentMemory:
+SELECT * FROM AgentMemory WHERE agentId = ? AND gameId = ?;
+
+selectAllAgentMemoriesForGame:
+SELECT * FROM AgentMemory WHERE gameId = ?;
+
+insertAgentMemory:
+INSERT OR REPLACE INTO AgentMemory (
+    agentId,
+    gameId,
+    memoryJson,
+    messageCount,
+    tokenEstimate,
+    lastConsolidated,
+    lastUpdated
+)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+deleteAgentMemory:
+DELETE FROM AgentMemory WHERE agentId = ? AND gameId = ?;
+
+deleteAgentMemoriesByGame:
+DELETE FROM AgentMemory WHERE gameId = ?;
+
+-- Queries for AgentAction table
+selectRecentAgentActions:
+SELECT * FROM AgentAction
+WHERE agentId = ? AND gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+selectAgentActionsByType:
+SELECT * FROM AgentAction
+WHERE agentId = ? AND gameId = ? AND actionType = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+selectAllActionsForGame:
+SELECT * FROM AgentAction
+WHERE gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+insertAgentAction:
+INSERT INTO AgentAction (
+    agentId,
+    gameId,
+    actionType,
+    actionJson,
+    reasoning,
+    playerLevel,
+    timestamp,
+    npcId,
+    questId,
+    plotThreadId,
+    locationId
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteAgentActionsByGame:
+DELETE FROM AgentAction WHERE gameId = ?;
+
+deleteOldAgentActions:
+DELETE FROM AgentAction
+WHERE gameId = ? AND timestamp < ?;
+
+-- Queries for AgentConsolidation table
+selectAgentConsolidations:
+SELECT * FROM AgentConsolidation
+WHERE agentId = ? AND gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+selectLatestConsolidation:
+SELECT * FROM AgentConsolidation
+WHERE agentId = ? AND gameId = ?
+ORDER BY timestamp DESC
+LIMIT 1;
+
+insertAgentConsolidation:
+INSERT INTO AgentConsolidation (
+    agentId,
+    gameId,
+    consolidationType,
+    summaryJson,
+    messagesConsolidated,
+    playerLevelStart,
+    playerLevelEnd,
+    timestamp
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteAgentConsolidationsByGame:
+DELETE FROM AgentConsolidation WHERE gameId = ?;
+
+-- ========================================
+-- PLOT GRAPH QUERIES
+-- ========================================
+
+-- PlotGraph queries
+selectPlotGraph:
+SELECT * FROM PlotGraph WHERE gameId = ?;
+
+insertPlotGraph:
+INSERT OR REPLACE INTO PlotGraph (gameId, graphJson, version, lastUpdated)
+VALUES (?, ?, ?, ?);
+
+deletePlotGraph:
+DELETE FROM PlotGraph WHERE gameId = ?;
+
+-- PlotNode queries
+selectPlotNodeById:
+SELECT * FROM PlotNode WHERE gameId = ? AND id = ?;
+
+selectPlotNodesByGame:
+SELECT * FROM PlotNode WHERE gameId = ?;
+
+selectReadyPlotNodes:
+SELECT * FROM PlotNode
+WHERE gameId = ?
+AND triggered = 0
+AND completed = 0
+AND abandoned = 0
+AND triggerLevel <= ?
+ORDER BY tier, sequence;
+
+selectActivePlotNodes:
+SELECT * FROM PlotNode
+WHERE gameId = ?
+AND triggered = 1
+AND completed = 0
+AND abandoned = 0
+ORDER BY tier, sequence;
+
+selectPlotNodesByTier:
+SELECT * FROM PlotNode
+WHERE gameId = ?
+AND tier = ?
+ORDER BY sequence;
+
+selectPlotNodesByThread:
+SELECT * FROM PlotNode
+WHERE gameId = ?
+AND threadId = ?
+ORDER BY sequence;
+
+insertPlotNode:
+INSERT OR REPLACE INTO PlotNode (
+    id,
+    gameId,
+    threadId,
+    nodeJson,
+    tier,
+    sequence,
+    branch,
+    beatType,
+    triggerLevel,
+    triggered,
+    completed,
+    abandoned,
+    createdAt
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+updatePlotNodeStatus:
+UPDATE PlotNode
+SET triggered = ?, completed = ?, abandoned = ?, nodeJson = ?
+WHERE gameId = ? AND id = ?;
+
+deletePlotNode:
+DELETE FROM PlotNode WHERE gameId = ? AND id = ?;
+
+deletePlotNodesByGame:
+DELETE FROM PlotNode WHERE gameId = ?;
+
+-- PlotEdge queries
+selectPlotEdgeById:
+SELECT * FROM PlotEdge WHERE gameId = ? AND id = ?;
+
+selectPlotEdgesByGame:
+SELECT * FROM PlotEdge WHERE gameId = ?;
+
+selectPlotEdgesFrom:
+SELECT * FROM PlotEdge
+WHERE gameId = ?
+AND fromNodeId = ?
+AND disabled = 0;
+
+selectPlotEdgesTo:
+SELECT * FROM PlotEdge
+WHERE gameId = ?
+AND toNodeId = ?
+AND disabled = 0;
+
+selectPlotEdgesByType:
+SELECT * FROM PlotEdge
+WHERE gameId = ?
+AND edgeType = ?
+AND disabled = 0;
+
+insertPlotEdge:
+INSERT OR REPLACE INTO PlotEdge (
+    id,
+    gameId,
+    fromNodeId,
+    toNodeId,
+    edgeType,
+    weight,
+    disabled
+)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+updatePlotEdgeStatus:
+UPDATE PlotEdge
+SET disabled = ?
+WHERE gameId = ? AND id = ?;
+
+deletePlotEdge:
+DELETE FROM PlotEdge WHERE gameId = ? AND id = ?;
+
+deletePlotEdgesByGame:
+DELETE FROM PlotEdge WHERE gameId = ?;
+
+-- AgentProposal queries
+selectProposalsBySession:
+SELECT * FROM AgentProposal
+WHERE planningSessionId = ?
+ORDER BY timestamp;
+
+selectProposalsByGame:
+SELECT * FROM AgentProposal
+WHERE gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+insertAgentProposal:
+INSERT INTO AgentProposal (
+    gameId,
+    agentId,
+    agentType,
+    proposalJson,
+    planningSessionId,
+    timestamp
+)
+VALUES (?, ?, ?, ?, ?, ?);
+
+deleteProposalsByGame:
+DELETE FROM AgentProposal WHERE gameId = ?;
+
+-- ConsensusResult queries
+selectConsensusResultBySession:
+SELECT * FROM ConsensusResult WHERE planningSessionId = ?;
+
+selectRecentConsensusResults:
+SELECT * FROM ConsensusResult
+WHERE gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+insertConsensusResult:
+INSERT INTO ConsensusResult (
+    gameId,
+    planningSessionId,
+    consensusJson,
+    consensusType,
+    conflictCount,
+    timestamp
+)
+VALUES (?, ?, ?, ?, ?, ?);
+
+deleteConsensusResultsByGame:
+DELETE FROM ConsensusResult WHERE gameId = ?;
+
+-- PlanningSession queries
+selectPlanningSessionById:
+SELECT * FROM PlanningSession WHERE id = ?;
+
+selectPlanningSessionsByGame:
+SELECT * FROM PlanningSession
+WHERE gameId = ?
+ORDER BY startedAt DESC;
+
+selectActivePlanningSession:
+SELECT * FROM PlanningSession
+WHERE gameId = ?
+AND completedAt IS NULL
+ORDER BY startedAt DESC
+LIMIT 1;
+
+selectLastCompletedSession:
+SELECT * FROM PlanningSession
+WHERE gameId = ?
+AND completedAt IS NOT NULL
+ORDER BY completedAt DESC
+LIMIT 1;
+
+insertPlanningSession:
+INSERT INTO PlanningSession (
+    id,
+    gameId,
+    mode,
+    triggerReason,
+    playerLevel,
+    graphVersion,
+    nextReplanLevel,
+    startedAt,
+    completedAt
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+updatePlanningSessionCompleted:
+UPDATE PlanningSession
+SET completedAt = ?
+WHERE id = ?;
+
+deletePlanningSessionsByGame:
+DELETE FROM PlanningSession WHERE gameId = ?;
+
+-- ========================================
+-- MULTI-ROUND AGENT DISCUSSION SYSTEM
+-- ========================================
+
+-- Table for storing conflicts that require multi-round discussion
+CREATE TABLE IF NOT EXISTS AgentConflict (
+    id TEXT PRIMARY KEY NOT NULL,
+    gameId TEXT NOT NULL,
+    planningSessionId TEXT NOT NULL,
+    conflictType TEXT NOT NULL,            -- PLOT_DIRECTION, NPC_INTRODUCTION, etc.
+    conflictJson TEXT NOT NULL,            -- Full PlotConflict object
+    status TEXT NOT NULL DEFAULT 'ACTIVE', -- ACTIVE, RESOLVED, ABANDONED
+    createdAt INTEGER NOT NULL,
+    resolvedAt INTEGER,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE,
+    FOREIGN KEY (planningSessionId) REFERENCES PlanningSession(id) ON DELETE CASCADE
+);
+
+-- Table for storing individual discussion rounds
+CREATE TABLE IF NOT EXISTS DiscussionRound (
+    id TEXT PRIMARY KEY NOT NULL,
+    conflictId TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    roundNumber INTEGER NOT NULL,
+    roundJson TEXT NOT NULL,               -- Full DiscussionRound object
+    contextFactorsJson TEXT NOT NULL,      -- ContextFactors at this round
+    consensusReached INTEGER NOT NULL DEFAULT 0,
+    chosenProposalId TEXT,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (conflictId) REFERENCES AgentConflict(id) ON DELETE CASCADE,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for storing individual agent arguments within rounds
+CREATE TABLE IF NOT EXISTS AgentArgument (
+    id TEXT PRIMARY KEY NOT NULL,
+    roundId TEXT NOT NULL,
+    conflictId TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    agentType TEXT NOT NULL,
+    position TEXT NOT NULL,                -- STRONG_SUPPORT, SUPPORT, NEUTRAL, etc.
+    supportedProposalId TEXT,
+    reasoning TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    keyPoints TEXT NOT NULL,               -- JSON array of strings
+    contextualJustification TEXT NOT NULL,
+    rebuttalTo TEXT,                       -- Comma-separated agent types
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (roundId) REFERENCES DiscussionRound(id) ON DELETE CASCADE,
+    FOREIGN KEY (conflictId) REFERENCES AgentConflict(id) ON DELETE CASCADE,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for storing final consensus results from discussions
+CREATE TABLE IF NOT EXISTS DiscussionConsensus (
+    id TEXT PRIMARY KEY NOT NULL,
+    conflictId TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    consensusJson TEXT NOT NULL,           -- Full ConsensusResult object
+    consensusType TEXT NOT NULL,           -- UNANIMOUS, STRONG_MAJORITY, MAJORITY, FALLBACK
+    chosenProposalId TEXT NOT NULL,
+    roundsUsed INTEGER NOT NULL,
+    implementationNotes TEXT,
+    minorityOpinions TEXT,                 -- JSON array of AgentArgument objects
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (conflictId) REFERENCES AgentConflict(id) ON DELETE CASCADE,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Table for storing complete discussion history for analysis
+CREATE TABLE IF NOT EXISTS DiscussionHistory (
+    id TEXT PRIMARY KEY NOT NULL,
+    conflictId TEXT NOT NULL,
+    gameId TEXT NOT NULL,
+    historyJson TEXT NOT NULL,             -- Full DiscussionHistory object
+    totalDuration INTEGER NOT NULL,        -- Milliseconds
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (conflictId) REFERENCES AgentConflict(id) ON DELETE CASCADE,
+    FOREIGN KEY (gameId) REFERENCES Game(id) ON DELETE CASCADE
+);
+
+-- Indexes for discussion queries
+CREATE INDEX IF NOT EXISTS idx_agent_conflict_game ON AgentConflict(gameId, status);
+CREATE INDEX IF NOT EXISTS idx_agent_conflict_session ON AgentConflict(planningSessionId);
+CREATE INDEX IF NOT EXISTS idx_discussion_round_conflict ON DiscussionRound(conflictId, roundNumber);
+CREATE INDEX IF NOT EXISTS idx_discussion_round_game ON DiscussionRound(gameId, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_argument_round ON AgentArgument(roundId);
+CREATE INDEX IF NOT EXISTS idx_agent_argument_conflict ON AgentArgument(conflictId);
+CREATE INDEX IF NOT EXISTS idx_agent_argument_agent ON AgentArgument(gameId, agentType);
+CREATE INDEX IF NOT EXISTS idx_discussion_consensus_conflict ON DiscussionConsensus(conflictId);
+CREATE INDEX IF NOT EXISTS idx_discussion_consensus_game ON DiscussionConsensus(gameId, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_discussion_history_game ON DiscussionHistory(gameId, timestamp DESC);
+
+-- Queries for AgentConflict table
+selectConflictById:
+SELECT * FROM AgentConflict WHERE id = ?;
+
+selectConflictsByGame:
+SELECT * FROM AgentConflict
+WHERE gameId = ?
+ORDER BY createdAt DESC;
+
+selectActiveConflicts:
+SELECT * FROM AgentConflict
+WHERE gameId = ?
+AND status = 'ACTIVE'
+ORDER BY createdAt DESC;
+
+selectConflictsBySession:
+SELECT * FROM AgentConflict
+WHERE planningSessionId = ?
+ORDER BY createdAt;
+
+insertConflict:
+INSERT INTO AgentConflict (
+    id,
+    gameId,
+    planningSessionId,
+    conflictType,
+    conflictJson,
+    status,
+    createdAt,
+    resolvedAt
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+updateConflictStatus:
+UPDATE AgentConflict
+SET status = ?, resolvedAt = ?
+WHERE id = ?;
+
+deleteConflictsByGame:
+DELETE FROM AgentConflict WHERE gameId = ?;
+
+-- Queries for DiscussionRound table
+selectRoundById:
+SELECT * FROM DiscussionRound WHERE id = ?;
+
+selectRoundsByConflict:
+SELECT * FROM DiscussionRound
+WHERE conflictId = ?
+ORDER BY roundNumber;
+
+selectLatestRound:
+SELECT * FROM DiscussionRound
+WHERE conflictId = ?
+ORDER BY roundNumber DESC
+LIMIT 1;
+
+insertRound:
+INSERT INTO DiscussionRound (
+    id,
+    conflictId,
+    gameId,
+    roundNumber,
+    roundJson,
+    contextFactorsJson,
+    consensusReached,
+    chosenProposalId,
+    timestamp
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteRoundsByConflict:
+DELETE FROM DiscussionRound WHERE conflictId = ?;
+
+deleteRoundsByGame:
+DELETE FROM DiscussionRound WHERE gameId = ?;
+
+-- Queries for AgentArgument table
+selectArgumentById:
+SELECT * FROM AgentArgument WHERE id = ?;
+
+selectArgumentsByRound:
+SELECT * FROM AgentArgument
+WHERE roundId = ?
+ORDER BY timestamp;
+
+selectArgumentsByConflict:
+SELECT * FROM AgentArgument
+WHERE conflictId = ?
+ORDER BY timestamp;
+
+selectArgumentsByAgent:
+SELECT * FROM AgentArgument
+WHERE gameId = ?
+AND agentType = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+insertArgument:
+INSERT INTO AgentArgument (
+    id,
+    roundId,
+    conflictId,
+    gameId,
+    agentType,
+    position,
+    supportedProposalId,
+    reasoning,
+    confidence,
+    keyPoints,
+    contextualJustification,
+    rebuttalTo,
+    timestamp
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteArgumentsByRound:
+DELETE FROM AgentArgument WHERE roundId = ?;
+
+deleteArgumentsByConflict:
+DELETE FROM AgentArgument WHERE conflictId = ?;
+
+deleteArgumentsByGame:
+DELETE FROM AgentArgument WHERE gameId = ?;
+
+-- Queries for DiscussionConsensus table
+selectConsensusById:
+SELECT * FROM DiscussionConsensus WHERE id = ?;
+
+selectConsensusByConflict:
+SELECT * FROM DiscussionConsensus WHERE conflictId = ?;
+
+selectRecentConsensuses:
+SELECT * FROM DiscussionConsensus
+WHERE gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+insertConsensus:
+INSERT INTO DiscussionConsensus (
+    id,
+    conflictId,
+    gameId,
+    consensusJson,
+    consensusType,
+    chosenProposalId,
+    roundsUsed,
+    implementationNotes,
+    minorityOpinions,
+    timestamp
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteConsensusByConflict:
+DELETE FROM DiscussionConsensus WHERE conflictId = ?;
+
+deleteDiscussionConsensusResultsByGame:
+DELETE FROM DiscussionConsensus WHERE gameId = ?;
+
+-- Queries for DiscussionHistory table
+selectHistoryById:
+SELECT * FROM DiscussionHistory WHERE id = ?;
+
+selectHistoryByConflict:
+SELECT * FROM DiscussionHistory WHERE conflictId = ?;
+
+selectRecentHistories:
+SELECT * FROM DiscussionHistory
+WHERE gameId = ?
+ORDER BY timestamp DESC
+LIMIT ?;
+
+insertHistory:
+INSERT INTO DiscussionHistory (
+    id,
+    conflictId,
+    gameId,
+    historyJson,
+    totalDuration,
+    timestamp
+)
+VALUES (?, ?, ?, ?, ?, ?);
+
+deleteHistoryByConflict:
+DELETE FROM DiscussionHistory WHERE conflictId = ?;
+
+deleteHistoriesByGame:
+DELETE FROM DiscussionHistory WHERE gameId = ?;

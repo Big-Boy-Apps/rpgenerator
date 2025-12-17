@@ -1,0 +1,14 @@
+#!/bin/bash
+# RPGenerator launcher script
+
+CLI_PATH="./cli/build/install/cli/bin/cli"
+
+# Check if CLI is built
+if [ ! -f "$CLI_PATH" ]; then
+    echo "Building RPGenerator CLI..."
+    ./gradlew :cli:installDist
+    echo ""
+fi
+
+# Run the CLI with all arguments passed through
+exec "$CLI_PATH" "$@"
