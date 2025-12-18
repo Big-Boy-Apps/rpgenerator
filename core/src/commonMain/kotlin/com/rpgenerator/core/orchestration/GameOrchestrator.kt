@@ -11,6 +11,7 @@ import com.rpgenerator.core.api.LLMInterface
 import com.rpgenerator.core.api.QuestStatus
 import com.rpgenerator.core.domain.GameState
 import com.rpgenerator.core.domain.LocationManager
+import com.rpgenerator.core.domain.NPC
 import com.rpgenerator.core.domain.ObjectiveType
 import com.rpgenerator.core.domain.Quest
 import com.rpgenerator.core.domain.QuestType
@@ -25,11 +26,18 @@ import com.rpgenerator.core.skill.SkillDatabase
 import com.rpgenerator.core.skill.SkillExecutionResult
 import com.rpgenerator.core.story.MainStoryArc
 import com.rpgenerator.core.story.NPCManager
+import com.rpgenerator.core.story.StoryFoundation
+import com.rpgenerator.core.story.StoryPlanningService
+import com.rpgenerator.core.story.NarratorContext
 import com.rpgenerator.core.generation.NPCArchetypeGenerator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import com.rpgenerator.core.tools.GameTools
 import com.rpgenerator.core.tools.GameToolsImpl
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.toList
 
 /**
  * Path complexity level for routing decisions
@@ -43,41 +51,61 @@ internal class GameOrchestrator(
     private val llm: LLMInterface,
     private var gameState: GameState
 ) {
-    private val narratorAgent = NarratorAgent(llm)
-    private val npcAgent = NPCAgent(llm)
-    private val locationGeneratorAgent = LocationGeneratorAgent(llm)
-    private val questGeneratorAgent = QuestGeneratorAgent(llm)
-    private val gameMasterAgent = GameMasterAgent(llm)
-    private val autonomousNPCAgent = AutonomousNPCAgent(llm)
-    private val npcArchetypeGenerator = NPCArchetypeGenerator(llm)
+    // Lazy agent initialization - agents are only created when first used
+    private val narratorAgent by lazy { NarratorAgent(llm) }
+    private val npcAgent by lazy { NPCAgent(llm) }
+    private val locationGeneratorAgent by lazy { LocationGeneratorAgent(llm) }
+    private val questGeneratorAgent by lazy { QuestGeneratorAgent(llm) }
+    private val gameMasterAgent by lazy { GameMasterAgent(llm) }
+    private val autonomousNPCAgent by lazy { AutonomousNPCAgent(llm) }
+    private val npcArchetypeGenerator by lazy { NPCArchetypeGenerator(llm) }
+    private val storyPlanningService by lazy { StoryPlanningService(llm) }
     private val npcManager = NPCManager()
     private val locationManager = LocationManager().apply {
         loadLocations(gameState.systemType)
     }
     private val rulesEngine = RulesEngine()
-    private val tools: GameToolsImpl = GameToolsImpl(locationManager, rulesEngine, locationGeneratorAgent, questGeneratorAgent)
+    private val tools by lazy { GameToolsImpl(locationManager, rulesEngine, locationGeneratorAgent, questGeneratorAgent) }
     private val skillAcquisitionService = SkillAcquisitionService()
     private val skillCombatService = SkillCombatService()
 
     // Simple in-memory event log
     private val eventLog = mutableListOf<GameEvent>()
 
+    // Story foundation - generated at game start, provides narrative context
+    private var storyFoundation: StoryFoundation? = null
+    private var storyPlanningStarted = false
+
+    // Background scope for async operations
+    private val backgroundScope = CoroutineScope(Dispatchers.Default)
+
     // Flag to track if we've initialized story NPCs
     private var storyNPCsInitialized = false
 
     suspend fun processInput(input: String): Flow<GameEvent> = flow {
-        // Initialize dynamic NPCs FIRST - before opening narration so NPCs are available
+        // Initialize NPCs first (adds to game state only, no events emitted yet)
         if (!storyNPCsInitialized) {
-            initializeDynamicNPCs(this)
+            initializeDynamicNPCsSilent()
             storyNPCsInitialized = true
         }
 
         // Play opening narration on first input (now NPCs are available in game state)
         if (!gameState.hasOpeningNarrationPlayed) {
-            val openingNarration = narratorAgent.narrateOpening(gameState)
+            val openingNarration = narratorAgent.narrateOpening(gameState, storyFoundation?.narratorContext)
             emit(GameEvent.NarratorText(openingNarration))
             eventLog.add(GameEvent.NarratorText(openingNarration))
             gameState = gameState.copy(hasOpeningNarrationPlayed = true)
+
+            // Now emit quest/NPC events after the opening narration
+            emitInitialQuestEvents(this)
+
+            // Don't process empty input after opening - player hasn't acted yet
+            if (input.isBlank()) return@flow
+        }
+
+        // Skip empty input - player hasn't provided an action
+        if (input.isBlank()) {
+            return@flow
         }
 
         // Check if player is dead before processing input
@@ -220,7 +248,8 @@ internal class GameOrchestrator(
             plan = scenePlan,
             results = sceneResults,
             state = gameState,
-            playerInput = input
+            playerInput = input,
+            narratorContext = storyFoundation?.narratorContext
         )
 
         // Step 4: Emit the unified narrative
@@ -678,13 +707,28 @@ internal class GameOrchestrator(
 
             Intent.NPC_DIALOGUE -> {
                 val npcName = intentAnalysis.target ?: "unknown"
-                val npc = gameState.findNPCByName(npcName)
+                var npc = gameState.findNPCByName(npcName)
 
+                // If fuzzy matching failed, try LLM resolution
                 if (npc == null) {
-                    val notFound = GameEvent.SystemNotification("There is no one named '$npcName' here.")
-                    flowCollector.emit(notFound)
-                    eventLog.add(notFound)
-                    return
+                    val availableNpcs = gameState.getNPCsAtCurrentLocation()
+                    if (availableNpcs.isEmpty()) {
+                        val notFound = GameEvent.SystemNotification("There's no one here to talk to.")
+                        flowCollector.emit(notFound)
+                        eventLog.add(notFound)
+                        return
+                    }
+
+                    // Use LLM to resolve which NPC the player means
+                    npc = resolveNPCWithLLM(input, availableNpcs)
+
+                    if (npc == null) {
+                        val options = availableNpcs.joinToString(", ") { it.name }
+                        val notFound = GameEvent.SystemNotification("Who do you want to talk to? Available: $options")
+                        flowCollector.emit(notFound)
+                        eventLog.add(notFound)
+                        return
+                    }
                 }
 
                 // Generate NPC dialogue using NPCAgent
@@ -859,6 +903,8 @@ internal class GameOrchestrator(
 
     /**
      * Handle class selection during tutorial.
+     * Shows classes grouped by archetype and supports custom class generation
+     * for players who push for something unique.
      */
     private suspend fun handleClassSelection(
         chosenClassName: String?,
@@ -875,71 +921,224 @@ internal class GameOrchestrator(
             return
         }
 
-        // Available classes
-        val availableClasses = listOf(
-            PlayerClass.WARRIOR,
-            PlayerClass.MAGE,
-            PlayerClass.ROGUE,
-            PlayerClass.RANGER,
-            PlayerClass.CULTIVATOR
-        )
+        // Check if player is asking for a custom/unique class
+        val lowerInput = input.lowercase()
+        val isAskingForCustom = lowerInput.contains("custom") ||
+            lowerInput.contains("unique") ||
+            lowerInput.contains("special") ||
+            lowerInput.contains("different") ||
+            lowerInput.contains("create my own") ||
+            lowerInput.contains("make my own") ||
+            lowerInput.contains("something else") ||
+            lowerInput.contains("none of these") ||
+            lowerInput.contains("other") ||
+            (lowerInput.contains("want") && lowerInput.contains("be")) || // "I want to be a..."
+            (lowerInput.contains("can i") && lowerInput.contains("be"))   // "Can I be a..."
 
-        // If no specific class chosen, show options
-        if (chosenClassName == null) {
-            val classListHeader = GameEvent.SystemNotification(
-                "╔════════════════════════════════════════╗\n" +
-                "║        CHOOSE YOUR CLASS               ║\n" +
-                "╚════════════════════════════════════════╝"
-            )
-            flowCollector.emit(classListHeader)
-            eventLog.add(classListHeader)
-
-            availableClasses.forEach { playerClass ->
-                val classInfo = GameEvent.SystemNotification(
-                    "\n【${playerClass.displayName}】\n" +
-                    "  ${playerClass.description}\n" +
-                    "  Bonuses: STR +${playerClass.statBonuses.strength}, " +
-                    "DEX +${playerClass.statBonuses.dexterity}, " +
-                    "CON +${playerClass.statBonuses.constitution}, " +
-                    "INT +${playerClass.statBonuses.intelligence}, " +
-                    "WIS +${playerClass.statBonuses.wisdom}, " +
-                    "CHA +${playerClass.statBonuses.charisma}"
-                )
-                flowCollector.emit(classInfo)
-                eventLog.add(classInfo)
-            }
-
-            val instructions = GameEvent.SystemNotification(
-                "\nType the class name to select it (e.g., 'warrior', 'mage', 'cultivator')"
-            )
-            flowCollector.emit(instructions)
-            eventLog.add(instructions)
-
-            // Generate narrative for class selection moment
-            val narration = narratorAgent.narrateClassSelection(gameState, availableClasses)
-            val narrativeEvent = GameEvent.NarratorText(narration)
-            flowCollector.emit(narrativeEvent)
-            eventLog.add(narrativeEvent)
-
+        if (isAskingForCustom && chosenClassName == null) {
+            // Player is pushing for something custom - engage with them
+            handleCustomClassRequest(input, flowCollector)
             return
         }
 
-        // Find the matching class
+        // If no specific class chosen, show options grouped by archetype
+        if (chosenClassName == null) {
+            showClassOptions(flowCollector)
+            return
+        }
+
+        // Check if this looks like a custom class request disguised as a class name
+        val availableClasses = PlayerClass.selectableClasses()
         val selectedClass = availableClasses.find {
             it.name.equals(chosenClassName, ignoreCase = true) ||
             it.displayName.equals(chosenClassName, ignoreCase = true)
         }
 
         if (selectedClass == null) {
-            val invalidChoice = GameEvent.SystemNotification(
-                "Unknown class: $chosenClassName. Available classes: ${availableClasses.joinToString { it.displayName }}"
-            )
-            flowCollector.emit(invalidChoice)
-            eventLog.add(invalidChoice)
+            // Not a standard class - this might be a custom class request!
+            // Try to generate a custom class based on what they asked for
+            handleCustomClassRequest(input, flowCollector, customClassName = chosenClassName)
             return
         }
 
         // Apply the class selection
+        applyClassSelection(selectedClass, flowCollector)
+    }
+
+    /**
+     * Show class options grouped by archetype.
+     */
+    private suspend fun showClassOptions(flowCollector: kotlinx.coroutines.flow.FlowCollector<GameEvent>) {
+        val header = GameEvent.SystemNotification(
+            "╔══════════════════════════════════════════════════════════════╗\n" +
+            "║              SYSTEM CLASS SELECTION                          ║\n" +
+            "║  Choose your path. This decision shapes your destiny.        ║\n" +
+            "╚══════════════════════════════════════════════════════════════╝"
+        )
+        flowCollector.emit(header)
+        eventLog.add(header)
+
+        // Group classes by archetype
+        val classesByArchetype = PlayerClass.byArchetype()
+
+        classesByArchetype.forEach { (archetype, classes) ->
+            val archetypeHeader = GameEvent.SystemNotification(
+                "\n═══ ${archetype.displayName.uppercase()} ═══"
+            )
+            flowCollector.emit(archetypeHeader)
+            eventLog.add(archetypeHeader)
+
+            classes.forEach { playerClass ->
+                val classInfo = GameEvent.SystemNotification(
+                    "  【${playerClass.displayName}】 ${playerClass.description}"
+                )
+                flowCollector.emit(classInfo)
+                eventLog.add(classInfo)
+            }
+        }
+
+        val footer = GameEvent.SystemNotification(
+            "\n═══════════════════════════════════════════════════════════════\n" +
+            "Type a class name to select it.\n" +
+            "Or describe what kind of path you want - the System may accommodate.\n" +
+            "═══════════════════════════════════════════════════════════════"
+        )
+        flowCollector.emit(footer)
+        eventLog.add(footer)
+
+        // Generate narrative for class selection moment
+        val availableClasses = PlayerClass.selectableClasses()
+        val narration = narratorAgent.narrateClassSelection(gameState, availableClasses)
+        val narrativeEvent = GameEvent.NarratorText(narration)
+        flowCollector.emit(narrativeEvent)
+        eventLog.add(narrativeEvent)
+    }
+
+    /**
+     * Handle requests for custom/unique classes.
+     * The System (via LLM) evaluates if the request is worthy and generates a unique class.
+     */
+    private suspend fun handleCustomClassRequest(
+        input: String,
+        flowCollector: kotlinx.coroutines.flow.FlowCollector<GameEvent>,
+        customClassName: String? = null
+    ) {
+        val requestedClass = customClassName ?: input
+
+        // Ask the LLM to evaluate and potentially generate a custom class
+        val customClassResult = generateCustomClass(requestedClass, gameState)
+
+        if (customClassResult != null) {
+            // The System grants a custom class!
+            val grantNotice = GameEvent.SystemNotification(
+                "╔══════════════════════════════════════════════════════════════╗\n" +
+                "║           SYSTEM NOTIFICATION: UNIQUE CLASS DETECTED         ║\n" +
+                "╚══════════════════════════════════════════════════════════════╝\n\n" +
+                "The System recognizes your unconventional request.\n" +
+                "Analyzing compatibility... Generating unique class template..."
+            )
+            flowCollector.emit(grantNotice)
+            eventLog.add(grantNotice)
+
+            // Apply the custom class (we'll map it to the closest archetype)
+            val baseClass = customClassResult.baseClass
+            applyClassSelection(baseClass, flowCollector, customClassResult.customName, customClassResult.customDescription)
+        } else {
+            // The System doesn't grant a custom class - guide them back to options
+            val denial = GameEvent.SystemNotification(
+                "The System considers your request...\n\n" +
+                "\"${requestedClass}\" is not recognized as a valid class path.\n" +
+                "Perhaps describe what you're looking for? Or choose from the available paths.\n" +
+                "\nType 'classes' to see available options."
+            )
+            flowCollector.emit(denial)
+            eventLog.add(denial)
+        }
+    }
+
+    /**
+     * Generate a custom class based on player request.
+     * Returns null if the request doesn't warrant a custom class.
+     */
+    private suspend fun generateCustomClass(request: String, state: GameState): CustomClassResult? {
+        // Use LLM to evaluate and generate a custom class
+        val systemPrompt = """
+You are the System, an impartial cosmic force that assigns classes to Integrated beings.
+You evaluate non-standard class requests and either grant unique classes or reject unworthy requests.
+Respond ONLY in the exact format specified - no additional text.
+""".trim()
+
+        val prompt = """
+A player has requested a non-standard class: "$request"
+Player backstory: ${state.backstory}
+Player name: ${state.playerName}
+
+Evaluate if this is a legitimate creative request worthy of a unique class.
+Reject requests that are:
+- Too vague (just "custom" or "something cool")
+- Joke/troll requests
+- Overpowered wish fulfillment ("god" "invincible" etc)
+
+If worthy, generate a unique class that:
+1. Fits the LitRPG/System Apocalypse genre
+2. Has a unique identity related to their request
+3. Maps to one of these base archetypes: SLAYER, BULWARK, STRIKER, CHANNELER, CULTIVATOR, PSION, ADAPTER, SURVIVALIST, BLADE_DANCER, ARTIFICER, HEALER, COMMANDER, CONTRACTOR, GLITCH, ECHO
+
+Respond in EXACTLY this format (or REJECT if not worthy):
+ACCEPT
+CLASS_NAME: [Unique class name, 1-3 words]
+DESCRIPTION: [One sentence description of the class]
+BASE_ARCHETYPE: [One of the archetypes listed above]
+
+Or if rejecting:
+REJECT
+REASON: [Brief reason]
+""".trim()
+
+        val agent = llm.startAgent(systemPrompt)
+        val response = agent.sendMessage(prompt).toList().joinToString("")
+        val lines = response.trim().lines()
+
+        if (lines.isEmpty() || lines[0].trim().uppercase() == "REJECT") {
+            return null
+        }
+
+        if (lines[0].trim().uppercase() == "ACCEPT" && lines.size >= 4) {
+            val className = lines.find { it.startsWith("CLASS_NAME:") }
+                ?.substringAfter(":")?.trim() ?: return null
+            val description = lines.find { it.startsWith("DESCRIPTION:") }
+                ?.substringAfter(":")?.trim() ?: return null
+            val archetypeName = lines.find { it.startsWith("BASE_ARCHETYPE:") }
+                ?.substringAfter(":")?.trim()?.uppercase() ?: return null
+
+            val baseClass = try {
+                PlayerClass.valueOf(archetypeName)
+            } catch (e: Exception) {
+                PlayerClass.ADAPTER // Default fallback
+            }
+
+            return CustomClassResult(
+                customName = className,
+                customDescription = description,
+                baseClass = baseClass
+            )
+        }
+
+        return null
+    }
+
+    /**
+     * Apply the class selection to the character.
+     */
+    private suspend fun applyClassSelection(
+        selectedClass: PlayerClass,
+        flowCollector: kotlinx.coroutines.flow.FlowCollector<GameEvent>,
+        customName: String? = null,
+        customDescription: String? = null
+    ) {
+        val displayName = customName ?: selectedClass.displayName
+        val description = customDescription ?: selectedClass.description
+
         val newSheet = gameState.characterSheet.chooseInitialClass(selectedClass)
         gameState = gameState.copy(characterSheet = newSheet)
 
@@ -950,11 +1149,16 @@ internal class GameOrchestrator(
         }
 
         // Emit class selection notification
+        val isCustom = customName != null
+        val headerText = if (isCustom) "UNIQUE CLASS GRANTED" else "CLASS CHOSEN"
+        val paddedName = displayName.uppercase().take(22).padEnd(22)
+
         val classChosen = GameEvent.SystemNotification(
             "╔════════════════════════════════════════╗\n" +
-            "║  CLASS CHOSEN: ${selectedClass.displayName.uppercase().padEnd(22)}║\n" +
+            "║  $headerText: $paddedName║\n" +
             "╚════════════════════════════════════════╝\n\n" +
-            "${selectedClass.description}\n\n" +
+            "$description\n\n" +
+            if (isCustom) "Base archetype: ${selectedClass.displayName}\n" else "" +
             "Stat bonuses applied!"
         )
         flowCollector.emit(classChosen)
@@ -968,11 +1172,50 @@ internal class GameOrchestrator(
 
         // Quest progress notification
         val progressEvent = GameEvent.SystemNotification(
-            "Quest Progress: Survive the Tutorial - Choose your starting class (Complete)"
+            "Quest Progress: System Integration - Choose your class (Complete)"
         )
         flowCollector.emit(progressEvent)
         eventLog.add(progressEvent)
     }
+
+    /**
+     * Use LLM to resolve which NPC the player is trying to interact with.
+     */
+    private suspend fun resolveNPCWithLLM(playerInput: String, availableNpcs: List<NPC>): NPC? {
+        if (availableNpcs.isEmpty()) return null
+        if (availableNpcs.size == 1) return availableNpcs.first()
+
+        val npcList = availableNpcs.mapIndexed { i, npc ->
+            "${i + 1}. ${npc.name} (${npc.archetype.name.lowercase().replace("_", " ")})"
+        }.joinToString("\n")
+
+        val prompt = """
+Player input: "$playerInput"
+
+NPCs present:
+$npcList
+
+Which NPC (if any) is the player trying to interact with?
+Respond with ONLY the number (1, 2, etc.) or "NONE" if unclear.
+""".trim()
+
+        val agent = llm.startAgent("You resolve ambiguous NPC references. Respond only with a number or NONE.")
+        val response = agent.sendMessage(prompt).toList().joinToString("").trim()
+
+        val index = response.toIntOrNull()?.minus(1)
+        return if (index != null && index in availableNpcs.indices) {
+            availableNpcs[index]
+        } else {
+            null
+        }
+    }
+
+    /** Result of custom class generation */
+    private data class CustomClassResult(
+        val customName: String,
+        val customDescription: String,
+        val baseClass: PlayerClass
+    )
 
     // ═══════════════════════════════════════════════════════════════════════════
     // SKILL HANDLERS
@@ -1638,7 +1881,99 @@ internal class GameOrchestrator(
     }
 
     /**
+     * Initialize dynamically generated NPCs for the current location (if in tutorial).
+     * Silent version - only updates game state, does NOT emit any events.
+     * Events are emitted separately via emitInitialQuestEvents() after the opening narration.
+     */
+    private suspend fun initializeDynamicNPCsSilent() {
+        // Start story planning in background - don't block game start
+        if (!storyPlanningStarted) {
+            storyPlanningStarted = true
+            backgroundScope.launch {
+                try {
+                    val foundation = storyPlanningService.initializeStory(
+                        gameId = gameState.gameId,
+                        systemType = gameState.systemType,
+                        playerName = gameState.playerName,
+                        backstory = gameState.backstory,
+                        startingLocation = gameState.currentLocation
+                    )
+                    storyFoundation = foundation
+                } catch (e: Exception) {
+                    // Story planning failed - game continues without it
+                    println("Story planning failed: ${e.message}")
+                }
+            }
+        }
+
+        // Generate tutorial guide dynamically if in tutorial zone
+        if (gameState.currentLocation.id.contains("tutorial")) {
+            // Generate unique tutorial guide for this playthrough
+            val tutorialGuide = npcArchetypeGenerator.generateTutorialGuide(
+                playerName = gameState.playerName,
+                systemType = gameState.systemType,
+                playerLevel = gameState.playerLevel,
+                seed = gameState.gameId.hashCode().toLong()
+            )
+
+            // Add to game state and NPC manager (no events emitted)
+            gameState = gameState.addNPC(tutorialGuide)
+            npcManager.registerGeneratedNPC(tutorialGuide)
+
+            // Add tutorial quest if not already present (no events emitted yet)
+            if (!gameState.activeQuests.containsKey("quest_survive_tutorial")) {
+                val tutorialQuest = createTutorialQuest(tutorialGuide.name)
+                gameState = gameState.addQuest(tutorialQuest)
+            }
+        }
+    }
+
+    /**
+     * Get the narrator context from the story foundation.
+     * Returns a default context if story planning hasn't been initialized.
+     */
+    internal fun getNarratorContext(): NarratorContext? {
+        return storyFoundation?.narratorContext
+    }
+
+    /**
+     * Get the full story foundation for debugging/inspection.
+     */
+    internal fun getStoryFoundation(): StoryFoundation? {
+        return storyFoundation
+    }
+
+    /**
+     * Emit initial quest and NPC events AFTER the opening narration has been displayed.
+     * This ensures the narrative flow is: Opening narration -> Quest notification -> NPC notice
+     */
+    private suspend fun emitInitialQuestEvents(flowCollector: kotlinx.coroutines.flow.FlowCollector<GameEvent>) {
+        // Emit quest notification for tutorial quest
+        val tutorialQuest = gameState.activeQuests["quest_survive_tutorial"]
+        if (tutorialQuest != null) {
+            val questEvent = GameEvent.QuestUpdate(
+                questId = tutorialQuest.id,
+                questName = tutorialQuest.name,
+                status = QuestStatus.NEW
+            )
+            flowCollector.emit(questEvent)
+            eventLog.add(questEvent)
+        }
+
+        // Emit notification about tutorial guide's presence (if in tutorial)
+        if (gameState.currentLocation.id.contains("tutorial")) {
+            val tutorialGuide = gameState.getNPCsAtCurrentLocation().firstOrNull()
+            if (tutorialGuide != null) {
+                val guideNotice = GameEvent.SystemNotification("${tutorialGuide.name} materializes before you.")
+                flowCollector.emit(guideNotice)
+                eventLog.add(guideNotice)
+            }
+        }
+    }
+
+    /**
      * Initialize dynamically generated NPCs for the current location (if in tutorial)
+     * @deprecated Use initializeDynamicNPCsSilent() + emitInitialQuestEvents() instead
      */
     private suspend fun initializeDynamicNPCs(flowCollector: kotlinx.coroutines.flow.FlowCollector<GameEvent>) {
         // Generate tutorial guide dynamically if in tutorial zone
@@ -1686,67 +2021,45 @@ internal class GameOrchestrator(
 
     /**
      * Create the tutorial quest with proper objectives.
-     * These objectives form a structured progression through the tutorial:
-     * 1. First, talk to the guide to get oriented
-     * 2. Choose your class (foundational decision)
-     * 3. Fight your first training construct
-     * 4. Check your stats/allocate points
-     * 5. Learn a skill
-     * 6. Complete the combat assessment (3 fights total)
+     * Class selection is the PRIMARY focus - everything else is secondary.
+     *
+     * Flow:
+     * 1. Choose your class (the foundational decision that shapes everything)
+     * 2. Review your status and understand your abilities
+     * 3. Test your new powers (optional combat or skill use)
      */
     private fun createTutorialQuest(guideName: String): Quest {
         return Quest(
             id = "quest_survive_tutorial",
-            name = "Survive the Tutorial",
-            description = "Learn the basics of the System and reach level 3",
+            name = "System Integration",
+            description = "The System requires you to choose a path. Your class defines who you will become.",
             type = QuestType.MAIN_STORY,
             giver = guideName,
             objectives = listOf(
                 QuestObjective(
-                    id = "tutorial_obj_intro",
-                    description = "Speak with $guideName to understand your situation",
-                    type = ObjectiveType.TALK,
-                    targetId = guideName.lowercase().replace(" ", "_"),
-                    targetProgress = 1
-                ),
-                QuestObjective(
                     id = "tutorial_obj_class",
-                    description = "Choose your starting class",
+                    description = "Choose your class - this decision shapes your entire future",
                     type = ObjectiveType.TALK,
                     targetId = "class",
                     targetProgress = 1
                 ),
                 QuestObjective(
-                    id = "tutorial_obj_first_combat",
-                    description = "Defeat your first training construct",
-                    type = ObjectiveType.KILL,
-                    targetId = "training construct",
-                    targetProgress = 1
-                ),
-                QuestObjective(
                     id = "tutorial_obj_stats",
-                    description = "Check your status and allocate stat points",
+                    description = "Review your status and understand your new abilities",
                     type = ObjectiveType.TALK,
                     targetId = "status",
                     targetProgress = 1
                 ),
                 QuestObjective(
-                    id = "tutorial_obj_skill",
-                    description = "Learn a basic skill from the skill menu",
+                    id = "tutorial_obj_test",
+                    description = "Test your abilities - use a skill or defeat an enemy",
                     type = ObjectiveType.TALK,
-                    targetId = "skills",
+                    targetId = "test",
                     targetProgress = 1
-                ),
-                QuestObjective(
-                    id = "tutorial_obj_assessment",
-                    description = "Complete $guideName's combat assessment (defeat 3 constructs)",
-                    type = ObjectiveType.KILL,
-                    targetId = "training construct",
-                    targetProgress = 3
                 )
             ),
             rewards = QuestRewards(
-                xp = 500L,
+                xp = 250L,
                 unlockedLocationIds = listOf("threshold_settlement", "fringe_zones")
             )
         )

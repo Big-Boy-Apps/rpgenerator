@@ -13,7 +13,20 @@ data class GameStateSnapshot(
     val currentScene: String,
     val inventory: List<Item>,
     val activeQuests: List<Quest>,
+    val npcsAtLocation: List<NPCInfo> = emptyList(),
     val recentEvents: List<GameEvent>
+)
+
+/**
+ * NPC information for UI display.
+ */
+@Serializable
+data class NPCInfo(
+    val id: String,
+    val name: String,
+    val archetype: String,
+    val disposition: String,
+    val description: String
 )
 
 @Serializable
@@ -26,7 +39,8 @@ data class PlayerStats(
     val health: Int,
     val maxHealth: Int,
     val energy: Int,
-    val maxEnergy: Int
+    val maxEnergy: Int,
+    val backstory: String = ""
 )
 
 @Serializable

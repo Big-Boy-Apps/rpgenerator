@@ -19,9 +19,10 @@ dependencies {
     implementation("org.slf4j:slf4j-simple:2.0.9")
 
     // Ktor for web server
-    implementation("io.ktor:ktor-server-core:2.3.7")
-    implementation("io.ktor:ktor-server-netty:2.3.7")
-    implementation("io.ktor:ktor-server-html-builder:2.3.7")
+    implementation("io.ktor:ktor-server-core:3.0.3")
+    implementation("io.ktor:ktor-server-netty:3.0.3")
+    implementation("io.ktor:ktor-server-html-builder:3.0.3")
+    implementation("io.ktor:ktor-server-websockets:3.0.3")
 }
 
 application {
@@ -30,4 +31,5 @@ application {
 
 tasks.named<JavaExec>("run") {
     standardInput = System.`in`
+    args = listOf("--claude-code", "--debug")
 }

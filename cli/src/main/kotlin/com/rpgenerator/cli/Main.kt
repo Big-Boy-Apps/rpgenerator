@@ -33,15 +33,6 @@ fun main(args: Array<String>) {
     // Choose LLM implementation based on flags or auto-detect
     val llm: LLMInterface = selectLLM(args)
 
-    // Check if image generation is enabled
-    val imageGenerator: ImageGenerator = if (args.contains("--image-gen") || args.contains("--images")) {
-        val generator = StableDiffusionGenerator()
-        println("🎨 Image generation enabled (checking service...)")
-        generator
-    } else {
-        NoOpImageGenerator()
-    }
-
     // Check if debug web server should auto-start
     val debugMode = args.contains("--debug")
     if (debugMode) {
@@ -51,7 +42,7 @@ fun main(args: Array<String>) {
     println()
 
     // Start the terminal UI
-    val terminal = RPGTerminal(client, llm, imageGenerator, debugMode)
+    val terminal = RPGTerminal(client, llm, debugMode)
     try {
         terminal.run()
     } finally {
@@ -204,7 +195,6 @@ private fun printHelp() {
           --list-models, --models  Show all available models and exit
 
         UI Options:
-          --image-gen, --images    Enable AI image generation for scenes (requires local service)
           --debug                  Auto-start web debug dashboard on http://localhost:8080
 
         Other Options:

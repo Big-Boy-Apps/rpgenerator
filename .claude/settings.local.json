@@ -15,7 +15,10 @@
       "Bash(python3:*)",
       "Bash(source venv/bin/activate)",
       "Bash(pip install:*)",
-      "Bash(pip search:*)"
+      "Bash(pip search:*)",
+      "Bash(lsof:*)",
+      "Bash(sqlite3:*)",
+      "Bash(brew install:*)"
     ],
     "deny": [],
     "ask": []

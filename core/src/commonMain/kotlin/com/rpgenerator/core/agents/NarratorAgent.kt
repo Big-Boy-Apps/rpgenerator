@@ -5,6 +5,7 @@ import com.rpgenerator.core.api.SystemType
 import com.rpgenerator.core.domain.GameState
 import com.rpgenerator.core.orchestration.*
 import com.rpgenerator.core.rules.CombatOutcome
+import com.rpgenerator.core.story.NarratorContext
 import kotlinx.coroutines.flow.toList
 
 internal class NarratorAgent(private val llm: LLMInterface) {
@@ -56,9 +57,20 @@ internal class NarratorAgent(private val llm: LLMInterface) {
         plan: ScenePlan,
         results: SceneResults,
         state: GameState,
-        playerInput: String
+        playerInput: String,
+        narratorContext: NarratorContext? = null
     ): String {
         val genreGuidance = getGenreGuidance(state.systemType)
+
+        // Build story context from NarratorContext
+        val storyContext = if (narratorContext != null) {
+            """
+            === STORY CONTEXT ===
+            System Name: "${narratorContext.systemName}"
+            Theme: ${narratorContext.thematicCore}
+            Current foreshadowing to weave in (if natural): ${narratorContext.currentForeshadowing.firstOrNull() ?: "none"}
+            """.trimIndent()
+        } else ""
 
         // Build NPC reactions section
         val npcReactionsText = if (plan.npcReactions.isNotEmpty()) {
@@ -98,6 +110,7 @@ internal class NarratorAgent(private val llm: LLMInterface) {
             RENDER THIS SCENE into vivid, cohesive prose.
 
             $genreGuidance
+            $storyContext
 
             PLAYER ACTION: "$playerInput"
             SCENE TONE: ${plan.sceneTone}
@@ -239,7 +252,7 @@ internal class NarratorAgent(private val llm: LLMInterface) {
     /**
      * Generate opening narration for a new game.
      */
-    suspend fun narrateOpening(state: GameState): String {
+    suspend fun narrateOpening(state: GameState, narratorContext: NarratorContext? = null): String {
         val genreGuidance = when (state.systemType) {
             SystemType.SYSTEM_INTEGRATION -> """
                 GENRE: System Apocalypse (Defiance of the Fall, Primal Hunter)
@@ -362,6 +375,24 @@ internal class NarratorAgent(private val llm: LLMInterface) {
         // Build quest context for the opening
         val questContext = buildQuestContext(state)
 
+        // Build story context from NarratorContext
+        val storyContext = if (narratorContext != null) {
+            """
+            === STORY CONTEXT (Use this to add depth and foreshadowing) ===
+            System Name: "${narratorContext.systemName}" (Use this name when referring to the System)
+            System Personality: ${narratorContext.systemPersonality}
+            Central Mystery: ${narratorContext.centralMystery}
+            Primary Threat: ${narratorContext.primaryThreat}
+            Theme: ${narratorContext.thematicCore}
+
+            FORESHADOWING HOOKS (weave 1-2 of these subtly into the narration):
+            ${narratorContext.currentForeshadowing.joinToString("\n            - ", prefix = "- ")}
+
+            UPCOMING STORY BEATS to hint at:
+            ${narratorContext.upcomingBeats.joinToString("\n            - ", prefix = "- ")}
+            """.trimIndent()
+        } else ""
+
         val prompt = """
             You are writing the opening hook—the first thing players read. Make it unforgettable.
             This is ${state.playerName}'s origin moment. Ground it in WHO THEY WERE before everything changed.
@@ -380,6 +411,8 @@ internal class NarratorAgent(private val llm: LLMInterface) {
             ${state.currentLocation.description}
             Features: ${state.currentLocation.features.joinToString(", ")}
             ${npcContext}
+
+            $storyContext
 
             === TUTORIAL OBJECTIVES ===
             $questContext

@@ -65,4 +65,99 @@ class RPGClient(
     fun close() {
         impl.close()
     }
+
+    /**
+     * Get recent events for a game.
+     * For the debug dashboard.
+     */
+    fun getRecentEvents(game: Game, limit: Int): List<EventLogEntry> {
+        return impl.getRecentEvents(game, limit)
+    }
+
+    /**
+     * Execute a raw SQL query.
+     * For the debug dashboard. Only SELECT queries are allowed.
+     */
+    fun executeRawQuery(sql: String): RawQueryResult {
+        return impl.executeRawQuery(sql)
+    }
+
+    /**
+     * Get data from a specific table.
+     * For the debug dashboard.
+     */
+    fun getTableData(tableName: String, gameId: String?, limit: Int): RawQueryResult {
+        return impl.getTableData(tableName, gameId, limit)
+    }
+
+    /**
+     * Get plot threads for a game.
+     * For the debug dashboard.
+     */
+    fun getPlotThreads(game: Game): List<PlotThreadEntry> {
+        return impl.getPlotThreads(game)
+    }
+
+    /**
+     * Get plot nodes for a game.
+     * For the debug dashboard.
+     */
+    fun getPlotNodes(game: Game): List<PlotNodeEntry> {
+        return impl.getPlotNodes(game)
+    }
+
+    /**
+     * Get plot edges for a game.
+     * For the debug dashboard.
+     */
+    fun getPlotEdges(game: Game): List<PlotEdgeEntry> {
+        return impl.getPlotEdges(game)
+    }
 }
+
+// Data classes for debug dashboard
+data class EventLogEntry(
+    val id: Int,
+    val timestamp: Long,
+    val eventType: String,
+    val category: String,
+    val importance: String,
+    val searchableText: String,
+    val npcId: String?,
+    val locationId: String?,
+    val questId: String?
+)
+
+data class RawQueryResult(
+    val columns: List<String>,
+    val rows: List<List<String?>>
+)
+
+data class PlotThreadEntry(
+    val id: String,
+    val category: String,
+    val priority: String,
+    val status: String,
+    val threadJson: String
+)
+
+data class PlotNodeEntry(
+    val id: String,
+    val threadId: String,
+    val tier: Int,
+    val sequence: Int,
+    val beatType: String,
+    val triggered: Boolean,
+    val completed: Boolean,
+    val abandoned: Boolean,
+    val nodeJson: String
+)
+
+data class PlotEdgeEntry(
+    val id: String,
+    val fromNodeId: String,
+    val toNodeId: String,
+    val edgeType: String,
+    val weight: Double,
+    val disabled: Boolean
+)

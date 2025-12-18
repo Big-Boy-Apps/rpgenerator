@@ -20,13 +20,44 @@ You bring your own LLM provider and your own I/O (voice, text, VR, whatever), an
 ### Build and Run
 
 ```bash
-# Run with Gradle
-./gradlew :cli:run --console=plain --args="--claude-code"
+# Run with Gradle (defaults to --claude-code --debug)
+./gradlew :cli:run --console=plain
 
-# Or build the distribution first
-./gradlew :cli:installDist
-./cli/build/install/cli/bin/cli --claude-code
+# Or specify options manually
+./gradlew :cli:run --console=plain --args="--claude-code"
 ```
+
+### Debug Dashboard
+
+When running with `--debug`, a web dashboard opens at **http://localhost:8080** with:
+
+- **Terminal** (left) - Game runs entirely in the browser
+- **Logs** - Setup events, AI calls, game events with filtering
+- **Character** - View character sheet, stats, inventory, quests, NPCs
+- **Agents** - View all AI agent conversations (system prompts, messages)
+- **Database** - Browse game tables and run queries
+- **Plan** - Visualize plot threads and game state
+
+### Text-to-Speech (TTS)
+
+The web dashboard includes optional TTS that reads narrative content aloud using Microsoft Edge's free neural voices.
+
+**Setup:**
+```bash
+# Install edge-tts (one time)
+pipx install edge-tts
+# Or: pip install edge-tts
+```
+
+**Usage:**
+1. Run with `--debug` flag
+2. Open http://localhost:8080
+3. Click the "TTS Off" button in the header to enable
+4. Select a voice from the dropdown (US/UK/AU male/female options)
+5. Narrative text and player choices are read automatically
+6. Press Enter to stop current speech and continue
+
+TTS settings persist across sessions.
 
 ### LLM Options
 

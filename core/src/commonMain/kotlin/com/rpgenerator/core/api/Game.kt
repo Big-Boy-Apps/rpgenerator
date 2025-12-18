@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.Flow
  * Processes player input and emits game events.
  */
 abstract class Game internal constructor(
-    private val gameId: String,
+    val id: String,
     private val llm: LLMInterface
 ) {
     /**

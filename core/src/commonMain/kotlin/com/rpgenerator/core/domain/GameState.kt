@@ -94,8 +94,14 @@ internal data class GameState(
         return npcsByLocation.values.flatten().find { it.id == npcId }
     }
 
+    /**
+     * Find an NPC by name using fuzzy matching.
+     * Returns null if no match found - caller should use LLM resolver for ambiguous cases.
+     */
     fun findNPCByName(name: String): NPC? {
         val npcs = getNPCsAtCurrentLocation()
+        if (npcs.isEmpty()) return null
+
         val searchTerm = name.lowercase()
 
         // Priority 1: Exact match (case insensitive)
@@ -104,40 +110,34 @@ internal data class GameState(
         // Priority 2: Name contains search term
         npcs.find { it.name.lowercase().contains(searchTerm) }?.let { return it }
 
-        // Priority 3: Search term contains part of name (e.g., "administrator arbiter" matches "Arbiter Zyx")
+        // Priority 3: Search term contains part of name (e.g., "arbiter grid" matches "Arbiter Grid")
         npcs.find { npc ->
             npc.name.lowercase().split(" ").any { namePart ->
                 searchTerm.contains(namePart) && namePart.length > 2
             }
         }?.let { return it }
 
-        // Priority 4: Match by archetype/role (e.g., "guide", "merchant", "administrator")
+        // Priority 4: Match by archetype keywords in search
         npcs.find { npc ->
-            npc.archetype.name.lowercase().contains(searchTerm) ||
-            searchTerm.contains(npc.archetype.name.lowercase())
+            npc.archetype.name.lowercase().replace("_", " ").split(" ").any { archetypePart ->
+                searchTerm.contains(archetypePart) && archetypePart.length > 3
+            }
         }?.let { return it }
 
-        // Priority 5: Match common title words to archetypes
-        val titleMappings = mapOf(
-            "administrator" to listOf("TUTORIAL_GUIDE", "SYSTEM_GUIDE"),
-            "arbiter" to listOf("TUTORIAL_GUIDE", "SYSTEM_GUIDE", "SAGE"),
-            "guide" to listOf("TUTORIAL_GUIDE", "MENTOR", "SAGE"),
-            "master" to listOf("MENTOR", "TRAINER", "SAGE"),
-            "teacher" to listOf("MENTOR", "TRAINER"),
-            "trainer" to listOf("TRAINER", "MENTOR"),
-            "merchant" to listOf("MERCHANT", "TRADER"),
-            "shopkeeper" to listOf("MERCHANT", "TRADER"),
-            "vendor" to listOf("MERCHANT", "TRADER")
-        )
-
-        for ((title, archetypes) in titleMappings) {
-            if (searchTerm.contains(title)) {
-                npcs.find { npc -> archetypes.any { it.equals(npc.archetype.name, ignoreCase = true) } }
-                    ?.let { return it }
-            }
+        // Priority 5: If only one NPC present, assume they mean that one
+        if (npcs.size == 1) {
+            return npcs.first()
         }
 
+        // No match found - caller should use LLM resolver
         return null
+    }
+
+    /**
+     * Get all NPCs at current location for LLM resolution.
+     */
+    fun getAvailableNPCsForResolution(): List<Pair<String, String>> {
+        return getNPCsAtCurrentLocation().map { it.name to it.archetype.name }
     }
 
     // Quest management methods

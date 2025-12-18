@@ -48,3 +48,4 @@ cli/image_gen/__pycache__/
 cli/music/*.wav
 cli/music/*.sf2
 cli/music/*.mid
+.rpgenerator-debug/

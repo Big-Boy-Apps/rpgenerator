@@ -6,6 +6,7 @@ import com.rpgenerator.core.character.CharacterCreationService
 import com.rpgenerator.core.domain.*
 import com.rpgenerator.core.persistence.GameDatabase
 import com.rpgenerator.core.persistence.GameRepository
+import com.rpgenerator.core.persistence.PlotGraphRepository
 import com.rpgenerator.core.util.randomUUID
 
 /**
@@ -17,12 +18,14 @@ internal class RPGClientImpl(
 ) {
     private val database: GameDatabase
     private val repository: GameRepository
+    private val plotRepository: PlotGraphRepository
 
     init {
         // Create database schema if needed
         GameDatabase.Schema.create(driver)
         database = GameDatabase(driver)
         repository = GameRepository(database)
+        plotRepository = PlotGraphRepository(database)
     }
 
     fun getGames(): List<GameInfo> {
@@ -56,6 +59,7 @@ internal class RPGClientImpl(
             gameId = gameId,
             llm = llm,
             repository = repository,
+            plotRepository = plotRepository,
             initialState = initialState
         )
     }
@@ -73,6 +77,7 @@ internal class RPGClientImpl(
             gameId = gameInfo.id,
             llm = llm,
             repository = repository,
+            plotRepository = plotRepository,
             initialState = state
         )
 
@@ -242,5 +247,168 @@ internal class RPGClientImpl(
      */
     fun close() {
         driver.close()
+    }
+
+    /**
+     * Get recent events for a game.
+     */
+    fun getRecentEvents(game: Game, limit: Int): List<EventLogEntry> {
+        val events = database.gameQueries.selectRecentEvents(game.id, limit.toLong()).executeAsList()
+
+        return events.map { event ->
+            EventLogEntry(
+                id = event.id.toInt(),
+                timestamp = event.timestamp,
+                eventType = event.eventType,
+                category = event.category,
+                importance = event.importance,
+                searchableText = event.searchableText,
+                npcId = event.npcId,
+                locationId = event.locationId,
+                questId = event.questId
+            )
+        }
+    }
+
+    /**
+     * Execute a raw SQL query. Only SELECT queries are allowed.
+     * Returns columns and rows as strings for display in the debug dashboard.
+     * Note: Raw SQL execution is limited in SQLDelight - use table-specific endpoints instead.
+     */
+    fun executeRawQuery(sql: String): RawQueryResult {
+        val trimmedSql = sql.trim().uppercase()
+        if (!trimmedSql.startsWith("SELECT")) {
+            throw IllegalArgumentException("Only SELECT queries are allowed")
+        }
+
+        // SQLDelight doesn't support arbitrary SQL execution easily
+        // Return a message directing users to use the table-specific queries
+        return RawQueryResult(
+            columns = listOf("info"),
+            rows = listOf(listOf("Use the table list on the left to browse data. Custom SQL queries are limited."))
+        )
+    }
+
+    /**
+     * Get data from a specific table.
+     * Uses SQLDelight queries to fetch data safely.
+     */
+    fun getTableData(tableName: String, gameId: String?, limit: Int): RawQueryResult {
+        return when (tableName) {
+            "Game" -> {
+                val games = if (gameId != null) {
+                    database.gameQueries.selectById(gameId).executeAsOneOrNull()?.let { g -> listOf(g) } ?: emptyList()
+                } else {
+                    database.gameQueries.selectAll().executeAsList()
+                }
+                RawQueryResult(
+                    columns = listOf("id", "playerName", "systemType", "level", "playtime", "lastPlayedAt", "createdAt"),
+                    rows = games.take(limit).map { g -> listOf(g.id, g.playerName, g.systemType, g.level.toString(), g.playtime.toString(), g.lastPlayedAt.toString(), g.createdAt.toString()) }
+                )
+            }
+            "GameEventLog" -> {
+                if (gameId == null) {
+                    return RawQueryResult(listOf("info"), listOf(listOf("Select a game to view event logs")))
+                }
+                val events = database.gameQueries.selectRecentEvents(gameId, limit.toLong()).executeAsList()
+                RawQueryResult(
+                    columns = listOf("id", "gameId", "timestamp", "eventType", "category", "importance", "searchableText"),
+                    rows = events.map { e -> listOf(e.id.toString(), e.gameId, e.timestamp.toString(), e.eventType, e.category, e.importance, e.searchableText.take(100)) }
+                )
+            }
+            "PlotThread" -> {
+                if (gameId == null) {
+                    return RawQueryResult(listOf("info"), listOf(listOf("Select a game to view plot threads")))
+                }
+                val threads = database.gameQueries.selectPlotThreadsByGame(gameId).executeAsList()
+                RawQueryResult(
+                    columns = listOf("id", "gameId", "category", "priority", "status"),
+                    rows = threads.map { t -> listOf(t.id, t.gameId, t.category, t.priority, t.status) }
+                )
+            }
+            "PlotNode" -> {
+                if (gameId == null) {
+                    return RawQueryResult(listOf("info"), listOf(listOf("Select a game to view plot nodes")))
+                }
+                val nodes = database.gameQueries.selectPlotNodesByGame(gameId).executeAsList()
+                RawQueryResult(
+                    columns = listOf("id", "threadId", "tier", "sequence", "beatType", "triggered", "completed"),
+                    rows = nodes.take(limit).map { n -> listOf(n.id, n.threadId, n.tier.toString(), n.sequence.toString(), n.beatType, n.triggered.toString(), n.completed.toString()) }
+                )
+            }
+            "PlotEdge" -> {
+                if (gameId == null) {
+                    return RawQueryResult(listOf("info"), listOf(listOf("Select a game to view plot edges")))
+                }
+                val edges = database.gameQueries.selectPlotEdgesByGame(gameId).executeAsList()
+                RawQueryResult(
+                    columns = listOf("id", "fromNodeId", "toNodeId", "edgeType", "weight", "disabled"),
+                    rows = edges.take(limit).map { edge -> listOf(edge.id, edge.fromNodeId, edge.toNodeId, edge.edgeType, edge.weight.toString(), edge.disabled.toString()) }
+                )
+            }
+            else -> {
+                // For tables without specific queries, return info message
+                RawQueryResult(
+                    columns = listOf("info"),
+                    rows = listOf(listOf("Table '$tableName' query not implemented. Available: Game, GameEventLog, PlotThread, PlotNode, PlotEdge"))
+                )
+            }
+        }
+    }
+
+    /**
+     * Get plot threads for a game.
+     */
+    fun getPlotThreads(game: Game): List<PlotThreadEntry> {
+        val threads = database.gameQueries.selectPlotThreadsByGame(game.id).executeAsList()
+
+        return threads.map { thread ->
+            PlotThreadEntry(
+                id = thread.id,
+                category = thread.category,
+                priority = thread.priority,
+                status = thread.status,
+                threadJson = thread.threadJson
+            )
+        }
+    }
+
+    /**
+     * Get plot nodes for a game.
+     */
+    fun getPlotNodes(game: Game): List<PlotNodeEntry> {
+        val nodes = database.gameQueries.selectPlotNodesByGame(game.id).executeAsList()
+
+        return nodes.map { node ->
+            PlotNodeEntry(
+                id = node.id,
+                threadId = node.threadId,
+                tier = node.tier.toInt(),
+                sequence = node.sequence.toInt(),
+                beatType = node.beatType,
+                triggered = node.triggered != 0L,
+                completed = node.completed != 0L,
+                abandoned = node.abandoned != 0L,
+                nodeJson = node.nodeJson
+            )
+        }
+    }
+
+    /**
+     * Get plot edges for a game.
+     */
+    fun getPlotEdges(game: Game): List<PlotEdgeEntry> {
+        val edges = database.gameQueries.selectPlotEdgesByGame(game.id).executeAsList()
+
+        return edges.map { edge ->
+            PlotEdgeEntry(
+                id = edge.id,
+                fromNodeId = edge.fromNodeId,
+                toNodeId = edge.toNodeId,
+                edgeType = edge.edgeType,
+                weight = edge.weight,
+                disabled = edge.disabled != 0L
+            )
+        }
     }
 }
